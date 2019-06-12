@@ -118,11 +118,11 @@ def binbblock (widths, counts, p0=0.05, itr = 1, datatype = 'unbinned',
     last = np.zeros (ncells, dtype=np.int)
     
     # iterate over prior
-    for _ in xrange (itr):
+    for _ in range (itr):
         ncp_prior = prior(p0)
         #print "Prior on blocks is ", ncp_prior
 
-        for r in xrange (ncells):
+        for r in range (ncells):
             if datatype == 'point':
                 sum_x_1 = np.cumsum( (counts / errs / errs)[:r+1][::-1] )[::-1] # sum( x / sig^2 ) = b
                 sum_x_0 = np.cumsum( (1. / errs / errs)[:r+1][::-1] )[::-1] # sum( 1 / sig^2 ) = a
@@ -189,7 +189,7 @@ def binbblock (widths, counts, p0=0.05, itr = 1, datatype = 'unbinned',
     if datatype == 'point':
         davg = np.empty (nblocks)
     
-    for iblk in xrange (nblocks):
+    for iblk in range (nblocks):
         cellstart = blockstarts[iblk]
         if iblk == nblocks - 1:
             cellend = ncells - 1
