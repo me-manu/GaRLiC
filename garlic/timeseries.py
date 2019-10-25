@@ -1,13 +1,16 @@
 import numpy as np
 import logging
 import time
-import psutil
-from astropy.table import Table
+try:
+    import psutil
+    from astropy.table import Table
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+except ImportError:
+    pass
 from scipy.interpolate import interp1d
 from scipy.stats import linregress
 from scipy.stats import norm, truncnorm
 from scipy.special import gammaln, gamma
-from statsmodels.nonparametric.smoothers_lowess import lowess
 from scipy.stats import binned_statistic
 from multiprocessing import Pool, cpu_count
 
