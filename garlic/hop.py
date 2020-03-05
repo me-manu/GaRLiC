@@ -23,7 +23,7 @@ def hop(x):
     Adopted from Jeff Scargle's implementation 
     in MatLab
     """
-    id_hop_vec = range(len(x))
+    id_hop_vec = list(range(len(x)))
     
     # Exceptions for end points:
 
