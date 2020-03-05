@@ -2,6 +2,7 @@ import numpy as np
 import logging
 import time
 import psutil
+import copy
 from astropy.table import Table
 from scipy.interpolate import interp1d
 from scipy.stats import linregress
@@ -27,6 +28,40 @@ def check_random_state(seed):
         return seed
     raise ValueError('%r cannot be used to seed a numpy.random.RandomState'
 ' instance' % seed)
+
+def build_model_par_cube(config, kws, log = False):
+    """
+    Build an n-dim cube with model parameters
+
+    Parameters
+    ----------
+    config: dict
+        dictionary with parameter mins, maxs, steps
+
+    kws: list of str
+        names of parameters
+
+    log: bool, optional
+        if True, create log grid. Default: False
+    """
+    pars = []
+    for k in kws:
+        if log:
+            pars.append(
+                np.logspace(np.log10(config[k + '_min']),
+                            np.log10(config[k + '_max']),
+                            config[k + '_steps'])
+                )
+        else:
+            pars.append(
+                np.linspace(config[k + '_min'],
+                            config[k + '_max'],
+                            config[k + '_steps'])
+                )
+    # has dimensions [pars_n, pars_(n-1), ..., pars_1, n]
+    coords = np.array([x for x in np.meshgrid(*pars, indexing = 'ij')]).T
+    return coords
+
 
 def opt_bins(data,maxM=100):
     """
@@ -114,7 +149,8 @@ def broken_power_law(nu, **p):
     result += p['const']
     return result
 
-def interp_lc(t,f,interp_tstep, interpolation = 'linear', lctype = 'density', axis = -1):
+def interp_lc(t,f,interp_tstep, interpolation = 'linear', lctype = 'density', axis = -1, 
+                min_int_step = 1.):
     """Interpolate the light curve on linear grid
 
     Parameters
@@ -134,19 +170,22 @@ def interp_lc(t,f,interp_tstep, interpolation = 'linear', lctype = 'density', ax
         if density, use linear interpolation at new points, 
         otherwise, form average
     
+    min_int_step: int
+        Mininum time gap allowed for interpolation,
+        default: 1.
     """
     if interpolation == 'none':
         ti = t
         fi = f
 
     else:
-        #print t.shape, f.shape
+        logging.debug(t.shape, f.shape)
         interp = interp1d(t, f, kind = interpolation,
                             fill_value = 'extrapolate', axis = axis)
         # new regular grid points 
-        if interp_tstep < 1.: 
-            logging.warning("Interp step < 1, setting to 1.")
-            interp_tstep = 1.
+        if interp_tstep < min_int_step: 
+            logging.warning("Interp step < {0:.1f}, setting to {0:.1f}".format(min_int_step))
+            interp_tstep = min_int_step
         ti = np.linspace(t.min(), t.max(), int(np.floor((t.max() - t.min()) / interp_tstep)) + 1)
 
         if lctype == 'density':
@@ -368,8 +407,8 @@ class TimeSeries(object):
 #        return ti, fi, dti
 
     @classmethod
-    def readformfermifits(cls,fitsfile, tsmin = 4., 
-        interpolation = 'linear', lctype = 'density'):
+    def readfromfermifits(cls,fitsfile, tsmin = 4., 
+        interpolation = 'linear', lctype = 'density', dtmax = None):
         #interp_tstep = None):
         """
         Read a fermipy created light curve fits file 
@@ -390,15 +429,28 @@ class TimeSeries(object):
             determines how gaps will be filled in interpolation.
             If "density", interpolated value will be used. 
             If "average", average value over sampling length will be used
-        interp_tstep: float, optional
-            determines the sampling of the light curve after interpolation
+        dtmax: float
+            if not None, use only light curve bins with centers < dtmax
         """
         lc = Table.read(fitsfile)
-        m = lc['ts'] >= tsmin
-        dt = lc['tmax'] - lc['tmin']
         t = 0.5 * (lc['tmax'] + lc['tmin'])
-        f = lc['flux']
-        e = lc['flux_err']
+        if dtmax is not None:
+            mdtmax = ((t - t.min()) < dtmax)
+            m = lc['ts'][mdtmax] >= tsmin
+            dt = lc['tmax'][mdtmax] - lc['tmin'][mdtmax]
+            t = 0.5 * (lc['tmax'][mdtmax] + lc['tmin'][mdtmax])
+            f = lc['flux'][mdtmax]
+            e = lc['flux_err'][mdtmax]
+        else:
+            m = lc['ts'] >= tsmin
+            dt = lc['tmax'] - lc['tmin']
+            f = lc['flux']
+            e = lc['flux_err']
+
+        # protect against NaNs in errors:
+        if np.any(np.isnan(e[m])):
+            logging.warning("Not all errors are finite in light curve!")
+        m &= np.isfinite(e)
 
         frac_ul = float((~m).sum()) / m.size
         logging.info("Total number of LC bins: {0:n}".format(
@@ -420,7 +472,10 @@ class TimeSeries(object):
                 pass
             else:
                 # calculate the length of the gap
-                gap = t[idx + g.size] - t[idx]
+                if idx + g.size >= t.size:
+                    gap = t.max() - t[idx]
+                else:
+                    gap = t[idx + g.size] - t[idx]
                 if gap > maxgap:
                     maxgap = gap
             idx += g.size
@@ -522,7 +577,7 @@ class TimeSeries(object):
 
         return Pk, nu
 
-    def calc_ti_split(self, t,f, tgap, interp_tstep_func):
+    def calc_ti_split(self, t,f, tgap, interp_tstep_func, min_int_step = 1.):
         """Get interpolated light curve for light curve piece split at gaps larger than tgap"""
         dt = np.diff(self._t) # gaps between observation points
         idx = np.nonzero(dt > tgap)[0]
@@ -548,6 +603,7 @@ class TimeSeries(object):
 
                         ti,fij,dti = interp_lc(x,y[:,isim - step:isim,:],
                             interp_tstep_func(np.diff(x)),
+                            min_int_step = min_int_step,
                             interpolation = self._interpolation, 
                             lctype = self._lctype, axis = -1) 
                         if not ij:
@@ -558,6 +614,7 @@ class TimeSeries(object):
                 else:
                     ti,fi,dti = interp_lc(x,y,
                             interp_tstep_func(np.diff(x)),
+                            min_int_step = min_int_step,
                             interpolation = self._interpolation, 
                             lctype = self._lctype, axis = -1) 
                 if ti.size > 1:
@@ -569,7 +626,8 @@ class TimeSeries(object):
 
     def periodogram_split(self, t, f, tgap, 
         window = 'hanning', detrend = 'none', norm = 'var', axis = -1, 
-        nubins = None, interp_tstep_func = lambda x: np.median(x)):
+        min_int_step = 1.,
+        nubins = 31, interp_tstep_func = lambda x: np.median(x)):
         """
         Calculate the Periodogram, split the light curves for 
         long observation gaps
@@ -583,8 +641,9 @@ class TimeSeries(object):
         tgap: float
             maximum value of gaps above which light curve will be split
 
-        nubins: `~numpy.ndarray` or int, optional
-            bins in frequency space or number of bins in log space
+        nubins: `~numpy.ndarray` or int or None, optional
+            bins in frequency space or number of bins in log space. If None, use bins 
+            from periodogram
         detrend: str, optional
             detrend the light curve.
             Options are 'none', 'constant', 'linear'
@@ -606,6 +665,11 @@ class TimeSeries(object):
             a float scalar.
             By default, it is the median of the time intervals of the light curve. 
 
+        min_int_step: int
+            minimum time step allowed for interpolation
+            to avoid making up too many data points
+            default: 1
+
 
         Returns
         -------
@@ -617,13 +681,20 @@ class TimeSeries(object):
         step = 1000 # step size for large simulated arrays
         mult = 10 if self._lctype == 'average' else 2
         tall, fall = [],[] # lists that will hold the times and fluxes for each segment
+
+        if not t.shape[-1] == f.shape[-1]:
+                raise ValueError("last axis of t and f must have" \
+                                 "same shape not {0}, {1}".format(t.shape, f.shape))
         if not len(idx): # no gaps larger than tgap
             logging.info("No gaps found, calculating full periodogram")
-            if len(f.shape) == 3 and f.nbytes * mult > psutil.virtual_memory().free: # check if there's enough memory
+
+            # check if there's enough memory
+            if len(f.shape) == 3 and f.nbytes * mult > psutil.virtual_memory().free:
                 for ij, isim in enumerate(np.arange(step, f.shape[1] + step, step)):
                     ti,fij,dti = interp_lc(t,f[:,isim - step:isim,:],
                         interp_tstep_func(np.diff(t)),
                         interpolation = self._interpolation, 
+                        min_int_step = min_int_step,
                         lctype = self._lctype, axis = -1) 
                     if not ij:
                         fi = fij
@@ -631,9 +702,11 @@ class TimeSeries(object):
                         fi = np.hstack([fi,fij])
                         logging.debug("Array too large, calculating: {0}".format((ij, fi.shape)))
             else:
+                   
                 ti,fi,dti = interp_lc(t,f,
                             interp_tstep_func(np.diff(t)),
                             interpolation = self._interpolation, 
+                            min_int_step = min_int_step,
                             lctype = self._lctype, axis = -1) 
             if ti.size > 1:
                 logging.info("Segment has {0:n} data points," \
@@ -651,6 +724,7 @@ class TimeSeries(object):
                         ti,fij,dti = interp_lc(t,f[:,isim - step:isim,:],
                             np.max(np.diff(t)),
                             interpolation = self._interpolation, 
+                            min_int_step = min_int_step,
                             lctype = self._lctype, axis = -1) 
                         if not ij:
                             fi = fij
@@ -660,6 +734,7 @@ class TimeSeries(object):
                 else:
                     ti,fi,dti = interp_lc(t,f,np.max(np.diff(t)),
                             interpolation = self._interpolation, 
+                            min_int_step = min_int_step,
                             lctype = self._lctype, axis = -1) 
                 if ti.size > 1:
                     logging.info("Full LC with max(dt) interpolation has {0:n} data points," \
@@ -677,45 +752,49 @@ class TimeSeries(object):
             nall.append(ni)
 
 
-        logging.info("Calculating log average")
-        t1 = time.time()
 
-        # nu bins in log space
-        n = np.concatenate(nall, axis = 0)
-        dn = np.diff(n)
-        if nubins is None or type(nubins) == int:
-            nubins = np.logspace(np.log10(n[1] - dn[0]/2.), 
-                np.log10(n[-1] + dn[0]/2.), 31 if nubins is None else nubins)
+        if nubins is not None:
+            logging.info("Calculating log average")
+            t1 = time.time()
+            # nu bins in log space
+            n = np.concatenate(nall, axis = 0)
+            dn = np.diff(n)
 
-        # bin the periodogram in logspace
-        # in case of data
-        if len(pall[0].shape) == 1: # data not sim
-            p = np.concatenate(pall, axis = 0)
-            r = binned_statistic(n,p, bins = nubins, statistic = logmean)
-            plogmean = 10.** r.statistic
-            r = binned_statistic(n,p, bins = nubins, statistic = logvar)
-            logplogvar = r.statistic
+            if type(nubins) == int:
+                nubins = np.logspace(np.log10(n[1] - dn[0]/2.), 
+                    np.log10(n[-1] + dn[0]/2.), nubins)
 
-        # in case of simulations
-        else:
-            if len(pall[0].shape) == 3:
-                psim = np.dstack(pall) # sim 
-                plogmean = np.zeros((psim.shape[0], psim.shape[1], nubins.size - 1))
-                logplogvar = np.zeros((psim.shape[0], psim.shape[1], nubins.size - 1))
-                for i, p in enumerate(psim):
-                    r = binned_statistic(n,p, bins = nubins, statistic = logmean)
-                    plogmean[i] = 10.** r.statistic
-                    r = binned_statistic(n,p, bins = nubins, statistic = logvar)
-                    logplogvar[i] = r.statistic
-            elif len(pall[0].shape) == 2:
-                psim = np.vstack(pall) # sim 
-                r = binned_statistic(n,psim, bins = nubins, statistic = logmean)
+            # bin the periodogram in logspace
+            # in case of data
+            if len(pall[0].shape) == 1: # data not sim
+                p = np.concatenate(pall, axis = 0)
+                r = binned_statistic(n,p, bins = nubins, statistic = logmean)
                 plogmean = 10.** r.statistic
-                r = binned_statistic(n,psim, bins = nubins, statistic = logvar)
+                r = binned_statistic(n,p, bins = nubins, statistic = logvar)
                 logplogvar = r.statistic
 
-        logging.info("Done, it took {0:.2f} s".format(time.time() - t1))
-        return nubins, plogmean, logplogvar
+            # in case of simulations
+            else:
+                if len(pall[0].shape) == 3:
+                    psim = np.dstack(pall) # sim 
+                    plogmean = np.zeros((psim.shape[0], psim.shape[1], nubins.size - 1))
+                    logplogvar = np.zeros((psim.shape[0], psim.shape[1], nubins.size - 1))
+                    for i, p in enumerate(psim):
+                        r = binned_statistic(n,p, bins = nubins, statistic = logmean)
+                        plogmean[i] = 10.** r.statistic
+                        r = binned_statistic(n,p, bins = nubins, statistic = logvar)
+                        logplogvar[i] = r.statistic
+                elif len(pall[0].shape) == 2:
+                    psim = np.vstack(pall) # sim 
+                    r = binned_statistic(n,psim, bins = nubins, statistic = logmean)
+                    plogmean = 10.** r.statistic
+                    r = binned_statistic(n,psim, bins = nubins, statistic = logvar)
+                    logplogvar = r.statistic
+
+            logging.info("Done, it took {0:.2f} s".format(time.time() - t1))
+            return nubins, plogmean, logplogvar
+        else:
+            return nall, pall, 0.
 
     def sim(self,  model, nextend = 1,
             N = None , dt = None ,
@@ -987,22 +1066,35 @@ class TimeSeries(object):
         if xsim.shape[-1] == self._t.size:
             replace = False
         else:
-            replace == True
+            replace = True
         logging.info("Using replacement: {0}".format(replace))
 
         if unctype == 'data' or unctype == 'datafraction':
+            # check if there's a nan in the lc errors
+            # if so, replace with a random finite error value
+            if np.any(np.isnan(self._e)):
+                mfin = np.isfinite(self._e)
+                e = copy.deepcopy(self._e)
+                e[~mfin] = np.random.choice(self._e[mfin], size = np.sum(~mfin))
+                logging.warning("Found NaNs in lc errors, replacing with random finite values")
+            else:
+                e = self._e
+
             if 'fraction' in unctype:
                 if replace:
-                    sigma_sim = (self._e / self._f)[np.random.choice(self._e.size,size = xsim.shape, replace = replace)] 
+                    sigma_sim = (e / self._f)[np.random.choice(self._e.size,
+                                                                     size = xsim.shape,
+                                                                     replace = replace)] 
                 else: 
-                    sigma_sim  = np.array([np.random.permutation(self._e / self._f) \
+                    sigma_sim  = np.array([np.random.permutation(e / self._f[mfin]) \
                                     for i in range(np.product(xsim.shape[:-1]))]).reshape(xsim.shape)
                 sigma_sim = np.abs(sigma_sim * xsim)
             else:
                 if replace:
-                    sigma_sim = self._e[np.random.choice(self._e.size,size = xsim.shape, replace = replace)] 
+                    sigma_sim = e[np.random.choice(self._e.size,size = xsim.shape,
+                                                         replace = replace)] 
                 else: 
-                    sigma_sim  = np.array([np.random.permutation(self._e) \
+                    sigma_sim  = np.array([np.random.permutation(e) \
                         for i in range(np.product(xsim.shape[:-1]))]).reshape(xsim.shape)
             esim = norm.rvs(loc = np.zeros(sigma_sim.shape), 
                             scale = sigma_sim)
@@ -1012,7 +1104,8 @@ class TimeSeries(object):
 
         elif unctype == 'datasort' or unctype == 'datasortfraction':
             if 'fraction' in unctype:
-                sigma_sim = (self._e / self._f)[np.random.choice(self._e.size,size = xsim.shape, replace = replace)] 
+                sigma_sim = (self._e / self._f)[np.random.choice(self._e.size,
+                                                                 size = xsim.shape, replace = replace)] 
                 sigma_sim = np.abs(sigma_sim * xsim)
             else:
                 sigma_sim = self._e[np.random.choice(self._e.size,size = xsim.shape, replace = replace)] 

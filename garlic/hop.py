@@ -126,7 +126,7 @@ def data_in_sheds(bbf,xmin, xmax, xref, y, id_sheds, yerr = None):
         return data_x,data_y
 
 def plot_sheds(xmin, xmax, y, id_sheds, bbf = None, ax = None, 
-               col = [plt.cm.tab10(0.8),plt.cm.tab10(1.0)], y2 = 0.,
+               col = ['0.5','0.7'], y2 = 0.,
                hatch = ['////','\\\\\\\\'], exp = 0., **kwargs):
     """
     Plot the sheds of flares

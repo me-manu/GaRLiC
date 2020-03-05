@@ -517,3 +517,18 @@ def calc_bb_unbinned(gta, energies, times, conv, prob,
         logging.error("Exp > 0. everywhere, selecting one bin over entire time range")
         bins = np.array([times.min(), times.max()])
     return bins, times, exp, prob, energies
+
+def plot_bblocks(tmin, tmax, bbf, avg, exp = 0., ax = None,
+    label = 'Bayesian blocks, $N_\mathrm{{Blocks}} = {0:n}$', **kwargs):
+    """
+    Plot Bayesian blocks
+    """
+    if type(ax) == type(None):
+        ax = plt.gca()
+    ax.plot(
+         np.concatenate([tmin[bbf],[tmax[-1]]]),
+         np.concatenate([avg,[avg[-1]]]) / 10.**exp, 
+         marker = 'None', drawstyle = 'steps-post',
+          label = label.format(bbf.size), 
+         **kwargs)
+    return
